@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 from scipy.stats import bootstrap
 from sklearn.metrics import auc
+from evaluation.fk_trending_sinusoids import fk_steered_nll
 
 EVAL_CONFIGS = {
     "test_num_z_samples": 32,
@@ -18,6 +19,9 @@ EVAL_CONFIGS = {
     "batch_size": 25,
     "device": torch.device("cuda:{}".format(0)),
 }
+
+FK_LAMBDAS = [0.0, 0.1, 0.3, 1.0, 3.0, 10.0]
+B_GRID = torch.linspace(0.0, 6.0, 61)
 
 
 def _load_model(config, save_dir, load_it="best"):
@@ -126,6 +130,18 @@ def get_summary_df(
     # Evaluate the models on different knowledge types
     loss = NLL(reduction="none")
 
+    use_fk = any(
+        config_dict[m].dataset
+        in ["set-trending-sinusoids", "set-trending-sinusoids-dist-shift"]
+        for m in model_names
+    )
+    fk_eval_info = []
+    if use_fk:
+        for eval_type in eval_type_ls:
+            for lam in FK_LAMBDAS:
+                fk_eval_info.append((eval_type, lam, f"{eval_type}_fk_lambda_{lam}"))
+    all_eval_types = list(eval_type_ls) + [name for _, _, name in fk_eval_info]
+
     losses = {}
     outputs_dict = {}
 
@@ -133,7 +149,7 @@ def get_summary_df(
     for model_name in model_names:
         losses[model_name] = {}
         outputs_dict[model_name] = {}
-        for eval_type in eval_type_ls:
+        for eval_type in all_eval_types:
             losses[model_name][eval_type] = {}
             outputs_dict[model_name][eval_type] = {}
             for num_context in num_context_ls:
@@ -146,6 +162,10 @@ def get_summary_df(
 
     for model_name in model_names:
         model, config = model_dict[model_name], config_dict[model_name]
+        is_trending_dataset = config.dataset in [
+            "set-trending-sinusoids",
+            "set-trending-sinusoids-dist-shift",
+        ]
 
         for batch in data_loader:
             (x_context, y_context), (x_target, y_target), knowledge, extras = batch
@@ -165,6 +185,7 @@ def get_summary_df(
 
                     for eval_type in eval_type_ls:
                         with torch.no_grad():
+                            knowledge_used = None
                             if eval_type == "raw":
                                 outputs = model(
                                     x_context,
@@ -173,6 +194,7 @@ def get_summary_df(
                                     y_target=y_target,
                                     knowledge=None,
                                 )
+                                knowledge_used = knowledge
                             elif config.use_knowledge:
                                 if eval_type == "informed":
                                     outputs = model(
@@ -182,14 +204,16 @@ def get_summary_df(
                                         y_target=y_target,
                                         knowledge=knowledge,
                                     )
+                                    knowledge_used = knowledge
                                 else:
                                     mask = get_mask(eval_type)
+                                    knowledge_used = knowledge * mask
                                     outputs = model(
                                         x_context,
                                         y_context,
                                         x_target,
                                         y_target=y_target,
-                                        knowledge=knowledge * mask,
+                                        knowledge=knowledge_used,
                                     )
                             else:
                                 continue
@@ -205,6 +229,32 @@ def get_summary_df(
                             losses[model_name][eval_type][num_context].append(
                                 loss_value
                             )
+                            if is_trending_dataset and knowledge_used is not None:
+                                for base_eval, lam, fk_name in fk_eval_info:
+                                    if base_eval != eval_type:
+                                        continue
+                                    fk_loss = fk_steered_nll(
+                                        outputs,
+                                        y_target=y_target,
+                                        x_target=x_target,
+                                        knowledge=knowledge_used,
+                                        lam=lam,
+                                        b_grid=B_GRID,
+                                    )
+                                    losses[model_name][fk_name][num_context].append(
+                                        fk_loss.cpu()
+                                    )
+                                    outputs_dict[model_name][fk_name][num_context].append(
+                                        {
+                                            "outputs": outputs,
+                                            "x_context": x_context.cpu(),
+                                            "y_context": y_context.cpu(),
+                                            "x_target": x_target.cpu(),
+                                            "y_target": y_target.cpu(),
+                                            "knowledge": knowledge,
+                                            "lam": lam,
+                                        }
+                                    )
                             outputs_dict[model_name][eval_type][num_context].append(
                                 {
                                     "outputs": outputs,
@@ -219,7 +269,7 @@ def get_summary_df(
     loss_summary = {}
     for model_name in model_names:
         loss_summary[model_name] = {}
-        for eval_type in eval_type_ls:
+        for eval_type in all_eval_types:
             loss_summary[model_name][eval_type] = {}
             for num_context in num_context_ls:
                 loss_summary[model_name][eval_type][num_context] = {}
@@ -228,8 +278,9 @@ def get_summary_df(
                     loss_summary[model_name][eval_type][num_context]["mean"] = np.nan
                     loss_summary[model_name][eval_type][num_context]["std"] = np.nan
                 else:
-                    loss_values = [lv[0] for lv in loss_values]
-                    loss_values = torch.stack(loss_values, dim=0)
+                    loss_values = torch.cat(
+                        [lv.detach().flatten() for lv in loss_values], dim=0
+                    )
                     loss_summary[model_name][eval_type][num_context]["median"] = (
                         torch.median(loss_values).item()
                     )
@@ -242,7 +293,7 @@ def get_summary_df(
 
     summary_df = pd.DataFrame()
     for model_name in model_names:
-        for eval_type in eval_type_ls:
+        for eval_type in all_eval_types:
             df = pd.DataFrame().from_dict(
                 loss_summary[model_name][eval_type], orient="index"
             )
