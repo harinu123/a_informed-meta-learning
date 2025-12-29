@@ -278,8 +278,9 @@ def get_summary_df(
                     loss_summary[model_name][eval_type][num_context]["mean"] = np.nan
                     loss_summary[model_name][eval_type][num_context]["std"] = np.nan
                 else:
-                    loss_values = [lv[0] for lv in loss_values]
-                    loss_values = torch.stack(loss_values, dim=0)
+                    loss_values = torch.cat(
+                        [lv.detach().flatten() for lv in loss_values], dim=0
+                    )
                     loss_summary[model_name][eval_type][num_context]["median"] = (
                         torch.median(loss_values).item()
                     )
