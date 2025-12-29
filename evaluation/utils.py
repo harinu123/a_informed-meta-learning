@@ -138,11 +138,8 @@ def get_summary_df(
     fk_eval_info = []
     if use_fk:
         for eval_type in eval_type_ls:
-            if eval_type != "raw":
-                for lam in FK_LAMBDAS:
-                    fk_eval_info.append(
-                        (eval_type, lam, f"{eval_type}_fk_lambda_{lam}")
-                    )
+            for lam in FK_LAMBDAS:
+                fk_eval_info.append((eval_type, lam, f"{eval_type}_fk_lambda_{lam}"))
     all_eval_types = list(eval_type_ls) + [name for _, _, name in fk_eval_info]
 
     losses = {}
@@ -197,6 +194,7 @@ def get_summary_df(
                                     y_target=y_target,
                                     knowledge=None,
                                 )
+                                knowledge_used = knowledge
                             elif config.use_knowledge:
                                 if eval_type == "informed":
                                     outputs = model(
@@ -231,7 +229,7 @@ def get_summary_df(
                             losses[model_name][eval_type][num_context].append(
                                 loss_value
                             )
-                            if is_trending_dataset and eval_type != "raw":
+                            if is_trending_dataset and knowledge_used is not None:
                                 for base_eval, lam, fk_name in fk_eval_info:
                                     if base_eval != eval_type:
                                         continue
