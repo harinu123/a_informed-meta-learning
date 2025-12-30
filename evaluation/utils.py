@@ -12,6 +12,7 @@ from tqdm import tqdm
 from scipy.stats import bootstrap
 from sklearn.metrics import auc
 from evaluation.fk_trending_sinusoids import fk_steered_nll
+from evaluation.fk_density_ratio import fk_density_ratio_nll
 
 EVAL_CONFIGS = {
     "test_num_z_samples": 32,
@@ -22,6 +23,8 @@ EVAL_CONFIGS = {
 
 FK_LAMBDAS = [0.0, 0.1, 0.3, 1.0, 3.0, 10.0]
 B_GRID = torch.linspace(0.0, 6.0, 61)
+FKDR_ALPHAS = [0.3, 1.0, 3.0, 10.0]
+FKDR_NUM_SAMPLES = 128
 
 
 def _sample_random_trending_knowledge(knowledge: torch.Tensor) -> torch.Tensor:
@@ -190,7 +193,20 @@ def get_summary_df(
         for eval_type in eval_type_ls:
             for lam in FK_LAMBDAS:
                 fk_eval_info.append((eval_type, lam, f"{eval_type}_fk_lambda_{lam}"))
+
+    use_fkdr = any(config_dict[m].use_knowledge for m in model_names)
+    fkdr_eval_info = []
+    if use_fkdr:
+        for eval_type in eval_type_ls:
+            if eval_type == "raw":
+                continue
+            for alpha in FKDR_ALPHAS:
+                fkdr_eval_info.append(
+                    (eval_type, alpha, f"{eval_type}_fkdr_alpha_{alpha}")
+                )
+
     all_eval_types = list(eval_type_ls) + [name for _, _, name in fk_eval_info]
+    all_eval_types += [name for _, _, name in fkdr_eval_info]
 
     losses = {}
     outputs_dict = {}
@@ -219,6 +235,7 @@ def get_summary_df(
 
         for batch in data_loader:
             (x_context, y_context), (x_target, y_target), knowledge, extras = batch
+            knowledge = knowledge.to(config.device)
             knowledge_ls.append(knowledge)
             y_target_ls.append(y_target)
             extras_ls.append(extras)
@@ -255,6 +272,16 @@ def get_summary_df(
                                         knowledge=knowledge,
                                     )
                                     knowledge_used = knowledge
+                                elif eval_type == "shuffled":
+                                    perm = torch.randperm(knowledge.shape[0], device=knowledge.device)
+                                    knowledge_used = knowledge[perm]
+                                    outputs = model(
+                                        x_context,
+                                        y_context,
+                                        x_target,
+                                        y_target=y_target,
+                                        knowledge=knowledge_used,
+                                    )
                                 elif eval_type == "random":
                                     knowledge_used = sample_random_knowledge(
                                         knowledge, config.dataset
@@ -278,14 +305,13 @@ def get_summary_df(
                                     )
                             else:
                                 continue
-                            outputs = tuple(
-                                [
-                                    o.cpu() if isinstance(o, torch.Tensor) else o
-                                    for o in outputs
-                                ]
-                            )
+                            outputs_device = outputs
                             loss_value, _, _ = loss.get_loss(
-                                outputs[0], outputs[1], outputs[2], outputs[3], y_target
+                                outputs_device[0],
+                                outputs_device[1],
+                                outputs_device[2],
+                                outputs_device[3],
+                                y_target,
                             )
                             losses[model_name][eval_type][num_context].append(
                                 loss_value
@@ -295,7 +321,7 @@ def get_summary_df(
                                     if base_eval != eval_type:
                                         continue
                                     fk_loss = fk_steered_nll(
-                                        outputs,
+                                        outputs_device,
                                         y_target=y_target,
                                         x_target=x_target,
                                         knowledge=knowledge_used,
@@ -307,25 +333,74 @@ def get_summary_df(
                                     )
                                     outputs_dict[model_name][fk_name][num_context].append(
                                         {
-                                            "outputs": outputs,
+                                            "outputs": tuple(
+                                                [
+                                                    o.detach().cpu()
+                                                    if isinstance(o, torch.Tensor)
+                                                    else o
+                                                    for o in outputs_device
+                                                ]
+                                            ),
                                             "x_context": x_context.cpu(),
                                             "y_context": y_context.cpu(),
                                             "x_target": x_target.cpu(),
                                             "y_target": y_target.cpu(),
-                                            "knowledge": knowledge_used,
+                                            "knowledge": knowledge_used.detach().cpu(),
                                             "lam": lam,
+                                        }
+                                    )
+                            if use_fkdr and config.use_knowledge and knowledge_used is not None:
+                                for base_eval, alpha, fkdr_name in fkdr_eval_info:
+                                    if base_eval != eval_type:
+                                        continue
+                                    fkdr_loss = fk_density_ratio_nll(
+                                        model,
+                                        x_context,
+                                        y_context,
+                                        x_target,
+                                        y_target=y_target,
+                                        knowledge=knowledge_used,
+                                        alpha=alpha,
+                                        num_samples=FKDR_NUM_SAMPLES,
+                                    )
+                                    losses[model_name][fkdr_name][num_context].append(
+                                        fkdr_loss.cpu()
+                                    )
+                                    outputs_dict[model_name][fkdr_name][num_context].append(
+                                        {
+                                            "outputs": tuple(
+                                                [
+                                                    o.detach().cpu()
+                                                    if isinstance(o, torch.Tensor)
+                                                    else o
+                                                    for o in outputs_device
+                                                ]
+                                            ),
+                                            "x_context": x_context.cpu(),
+                                            "y_context": y_context.cpu(),
+                                            "x_target": x_target.cpu(),
+                                            "y_target": y_target.cpu(),
+                                            "knowledge": knowledge_used.detach().cpu(),
+                                            "alpha": alpha,
                                         }
                                     )
                             outputs_dict[model_name][eval_type][num_context].append(
                                 {
-                                    "outputs": outputs,
+                                    "outputs": tuple(
+                                        [
+                                            o.detach().cpu()
+                                            if isinstance(o, torch.Tensor)
+                                            else o
+                                            for o in outputs_device
+                                        ]
+                                    ),
                                     "x_context": x_context.cpu(),
                                     "y_context": y_context.cpu(),
                                     "x_target": x_target.cpu(),
                                     "y_target": y_target.cpu(),
-                                    "knowledge": knowledge_used
+                                    "knowledge": knowledge_used.detach().cpu()
                                     if knowledge_used is not None
-                                    else knowledge,
+                                    else knowledge.cpu(),
                                 }
                             )
 
