@@ -295,6 +295,9 @@ def get_summary_df(
                                     )
                                 else:
                                     mask = get_mask(eval_type)
+                                    # Ensure mask lives on the same device as knowledge
+                                    # to avoid device mismatch when multiplying.
+                                    mask = mask.to(knowledge.device)
                                     knowledge_used = knowledge * mask
                                     outputs = model(
                                         x_context,
