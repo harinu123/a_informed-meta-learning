@@ -21,15 +21,30 @@ class INP(nn.Module):
         self.train_num_z_samples = config.train_num_z_samples
         self.test_num_z_samples = config.test_num_z_samples
 
-    def forward(self, x_context, y_context, x_target, y_target, knowledge=None):
+    def forward(
+        self,
+        x_context,
+        y_context,
+        x_target,
+        y_target,
+        knowledge=None,
+        z_samples=None,
+    ):
         x_context = self.x_encoder(x_context)  # [bs, num_context, x_transf_dim]
         x_target = self.x_encoder(x_target)  # [bs, num_context, x_transf_dim]
 
         R = self.encode_globally(x_context, y_context, x_target)
+        q_z_Cc = self.infer_latent_dist(R, knowledge, x_context.shape[1])
 
-        z_samples, q_z_Cc, q_zCct = self.sample_latent(
-            R, x_context, x_target, y_target, knowledge
-        )
+        if z_samples is None:
+            z_samples, _, q_zCct = self.sample_latent(
+                R, x_context, x_target, y_target, knowledge, q_z_Cc
+            )
+        else:
+            q_zCct = None
+            if z_samples.dim() == 3:
+                z_samples = z_samples.unsqueeze(2)
+
         # reshape z_samples to the shape of x_target
         R_target = self.target_dependent_representation(R, x_target, z_samples)
 
@@ -51,12 +66,13 @@ class INP(nn.Module):
     def get_knowledge_embedding(self, knowledge):
         return self.latent_encoder.get_knowledge_embedding(knowledge)
 
-    def sample_latent(self, R, x_context, x_target, y_target, knowledge):
+    def sample_latent(self, R, x_context, x_target, y_target, knowledge, q_zCc=None):
         """
         Sample latent variable z given the global representation
         (and during training given the target)
         """
-        q_zCc = self.infer_latent_dist(R, knowledge, x_context.shape[1])
+        if q_zCc is None:
+            q_zCc = self.infer_latent_dist(R, knowledge, x_context.shape[1])
 
         if y_target is not None and self.training:
             R_from_target = self.encode_globally(x_target, y_target, x_target)
