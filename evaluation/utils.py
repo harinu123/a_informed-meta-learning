@@ -24,6 +24,56 @@ FK_LAMBDAS = [0.0, 0.1, 0.3, 1.0, 3.0, 10.0]
 B_GRID = torch.linspace(0.0, 6.0, 61)
 
 
+def _sample_random_trending_knowledge(knowledge: torch.Tensor) -> torch.Tensor:
+    """Generate random knowledge tensors matching the trending-sinusoid format.
+
+    The input ``knowledge`` is shaped ``[B, R, 4]`` with one-hot over a/b/c in the
+    first three entries and the value in the last. We preserve the number of facts
+    (non-zero rows) per batch item but replace both the one-hot indicator and the
+    value with random draws in the appropriate ranges: ``a,c \in [-1,1]`` and
+    ``b \in [0,6]``.
+    """
+
+    device = knowledge.device
+    random_knowledge = torch.zeros_like(knowledge, device=device)
+
+    # Facts are rows whose one-hot indicator is non-zero in the first three dims.
+    fact_mask = knowledge[..., :3].sum(dim=-1) > 0  # [B, R]
+    if not fact_mask.any():
+        return random_knowledge
+
+    fact_indices = fact_mask.nonzero(as_tuple=False)  # [N, 2] -> (b, r)
+
+    # Randomly pick which parameter each fact refers to.
+    rand_params = torch.randint(0, 3, (fact_indices.size(0),), device=device)
+
+    # Parameter ranges: a in [-1,1], b in [0,6], c in [-1,1]
+    low = torch.tensor([-1.0, 0.0, -1.0], device=device)
+    high = torch.tensor([1.0, 6.0, 1.0], device=device)
+    rand_values = torch.rand(fact_indices.size(0), device=device)
+    rand_values = rand_values * (high[rand_params] - low[rand_params]) + low[
+        rand_params
+    ]
+
+    random_knowledge[fact_indices[:, 0], fact_indices[:, 1], rand_params] = 1.0
+    random_knowledge[fact_indices[:, 0], fact_indices[:, 1], 3] = rand_values
+    return random_knowledge
+
+
+def sample_random_knowledge(knowledge: torch.Tensor, dataset: str) -> torch.Tensor:
+    """Create a random knowledge tensor matching the provided shape.
+
+    Currently, trending-sinusoid datasets use 3x4 tensors with one-hot indicators,
+    so we dispatch to a specialized sampler. For other datasets, we fall back to
+    standard Gaussian noise with the same shape.
+    """
+
+    if dataset in ["set-trending-sinusoids", "set-trending-sinusoids-dist-shift"]:
+        return _sample_random_trending_knowledge(knowledge)
+
+    return torch.randn_like(knowledge)
+
+
 def _load_model(config, save_dir, load_it="best"):
     print(save_dir)
     model = INP(config)
@@ -205,6 +255,17 @@ def get_summary_df(
                                         knowledge=knowledge,
                                     )
                                     knowledge_used = knowledge
+                                elif eval_type == "random":
+                                    knowledge_used = sample_random_knowledge(
+                                        knowledge, config.dataset
+                                    )
+                                    outputs = model(
+                                        x_context,
+                                        y_context,
+                                        x_target,
+                                        y_target=y_target,
+                                        knowledge=knowledge_used,
+                                    )
                                 else:
                                     mask = get_mask(eval_type)
                                     knowledge_used = knowledge * mask
@@ -251,7 +312,7 @@ def get_summary_df(
                                             "y_context": y_context.cpu(),
                                             "x_target": x_target.cpu(),
                                             "y_target": y_target.cpu(),
-                                            "knowledge": knowledge,
+                                            "knowledge": knowledge_used,
                                             "lam": lam,
                                         }
                                     )
@@ -262,7 +323,9 @@ def get_summary_df(
                                     "y_context": y_context.cpu(),
                                     "x_target": x_target.cpu(),
                                     "y_target": y_target.cpu(),
-                                    "knowledge": knowledge,
+                                    "knowledge": knowledge_used
+                                    if knowledge_used is not None
+                                    else knowledge,
                                 }
                             )
 
