@@ -62,6 +62,13 @@ def main():
         "--n-trials", type=int, help="Number of optuna trials", default=1
     )
     parser.add_argument("--beta", type=float, help="Beta VAE", default=1)
+    parser.add_argument(
+        "--model-variant",
+        type=str,
+        help="Model variant",
+        default="inp",
+        choices=["inp", "inp_attn_poe"],
+    )
 
     # dataloader
     parser.add_argument(
@@ -126,6 +133,20 @@ def main():
     )
     parser.add_argument(
         "--knowledge-dropout", type=float, help="Knowledge dropout", default=0.3
+    )
+    parser.add_argument(
+        "--gate-supervision",
+        type=str2bool,
+        const=True,
+        nargs="?",
+        help="Enable gate supervision for attention PoE",
+        default=False,
+    )
+    parser.add_argument(
+        "--gate-supervision-prob",
+        type=float,
+        help="Probability of knowledge shuffling for gate supervision",
+        default=0.3,
     )
 
     # model architecture
@@ -192,6 +213,18 @@ def main():
         default=1,
     )
     parser.add_argument(
+        "--attn-heads",
+        type=int,
+        help="Number of heads for knowledge cross-attention",
+        default=4,
+    )
+    parser.add_argument(
+        "--attn-dropout",
+        type=float,
+        help="Dropout for knowledge cross-attention",
+        default=0.0,
+    )
+    parser.add_argument(
         "--path",
         type=str,
         help="Path",
@@ -215,7 +248,7 @@ def main():
         type=str,
         help="Knowledge merge",
         default="concat",
-        choices=["concat", "sum", "mlp"],
+        choices=["concat", "sum", "mlp", "attn_poe_gated"],
     )
     parser.add_argument(
         "--knowledge-dim",

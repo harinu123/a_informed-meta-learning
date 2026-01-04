@@ -3,6 +3,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(os.path.join(__file__, os.pardir))))
 from models.inp import INP
+from models.inp_attn_poe import INPAttnPoE
 import torch
 from config import Config
 from models.loss import NLL
@@ -77,9 +78,43 @@ def sample_random_knowledge(knowledge: torch.Tensor, dataset: str) -> torch.Tens
     return torch.randn_like(knowledge)
 
 
+MODEL_REGISTRY = {
+    "inp": INP,
+    "inp_attn_poe": INPAttnPoE,
+}
+
+
+def _get_model_cls(config):
+    model_variant = getattr(config, "model_variant", "inp")
+
+    if (
+        model_variant != "inp_attn_poe"
+        and getattr(config, "knowledge_merge", None) == "attn_poe_gated"
+    ):
+        # Saved configs from attn_poe runs should include model_variant, but if not,
+        # fall back to the only compatible architecture to avoid constructor errors.
+        model_variant = "inp_attn_poe"
+        config.model_variant = model_variant
+
+    model_cls = MODEL_REGISTRY.get(model_variant)
+    if model_cls is None:
+        raise ValueError(f"Unknown model variant {model_variant}")
+    return model_cls
+
+
 def _load_model(config, save_dir, load_it="best"):
     print(save_dir)
-    model = INP(config)
+    if not hasattr(config, "gate_supervision"):
+        config.gate_supervision = False
+    if not hasattr(config, "gate_supervision_prob"):
+        config.gate_supervision_prob = 0.3
+    if not hasattr(config, "attn_heads"):
+        config.attn_heads = 4
+    if not hasattr(config, "attn_dropout"):
+        config.attn_dropout = 0.0
+
+    model_cls = _get_model_cls(config)
+    model = model_cls(config)
     model.to(config.device)
     model.eval()
     state_dict = torch.load(f"{save_dir}/model_{load_it}.pt")
