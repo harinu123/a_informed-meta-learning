@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import wandb
 import numpy as np
 import os
@@ -14,6 +15,47 @@ from models.loss import ELBOLoss
 EVAL_ITER = 500
 SAVE_ITER = 500
 MAX_EVAL_IT = 50
+
+
+def _randperm_no_fixed(bs, device):
+    perm = torch.randperm(bs, device=device)
+    fixed = perm == torch.arange(bs, device=device)
+    if fixed.any():
+        perm[fixed] = (perm[fixed] + 1) % bs
+    return perm
+
+
+def _shuffle_knowledge(knowledge, perm):
+    if isinstance(knowledge, torch.Tensor):
+        return knowledge[perm]
+    else:
+        k_list = list(knowledge)
+        perm_cpu = perm.detach().cpu().tolist()
+        return [k_list[i] for i in perm_cpu]
+
+
+def corrupt_knowledge(knowledge, p, device):
+    # Returns (knowledge_used, match_label_tensor[bs]) where 1=match, 0=mismatch
+    if knowledge is None or p <= 0:
+        return knowledge, None
+    bs = len(knowledge) if not isinstance(knowledge, torch.Tensor) else knowledge.shape[0]
+    if bs < 2:
+        return knowledge, torch.ones(bs, device=device)
+    perm = _randperm_no_fixed(bs, device=device)
+    shuffled = _shuffle_knowledge(knowledge, perm)
+    mask = (torch.rand(bs, device=device) < p)
+    match = (~mask).float()
+
+    if isinstance(knowledge, torch.Tensor):
+        knowledge_used = knowledge.clone()
+        knowledge_used[mask] = shuffled[mask]
+    else:
+        k_list = list(knowledge)
+        s_list = list(shuffled)
+        knowledge_used = [
+            (s_list[i] if mask[i].item() else k_list[i]) for i in range(bs)
+        ]
+    return knowledge_used, match
 
 
 class Trainer:
@@ -96,7 +138,34 @@ class Trainer:
         x_target = x_target.to(self.device)
         y_target = y_target.to(self.device)
 
-        results = self.get_loss(x_context, y_context, x_target, y_target, knowledge)
+        if isinstance(knowledge, torch.Tensor):
+            knowledge = knowledge.to(self.device)
+
+        knowledge_used = knowledge
+        match = None
+        if self.config.use_knowledge and self.config.knowledge_merge == "poe":
+            knowledge_used, match = corrupt_knowledge(
+                knowledge, self.config.knowledge_mismatch_prob, self.device
+            )
+
+        results = self.get_loss(
+            x_context, y_context, x_target, y_target, knowledge_used
+        )
+
+        if match is not None and knowledge_used is not None:
+            aux = self.model.latent_encoder.last_aux.get("Cc", None)
+            if aux is not None and (not aux["drop_knowledge"]):
+                trust_logit = aux["trust_logit"].squeeze(-1).squeeze(1)
+                trust_loss = F.binary_cross_entropy_with_logits(trust_logit, match)
+                results["trust_loss"] = trust_loss
+                results["loss_total"] = (
+                    results["loss"]
+                    + self.config.knowledge_trust_loss_weight * trust_loss
+                )
+            else:
+                results["loss_total"] = results["loss"]
+        else:
+            results["loss_total"] = results["loss"]
 
         return results
 
@@ -123,7 +192,7 @@ class Trainer:
                 self.model.train()
                 self.optimizer.zero_grad()
                 results = self.run_batch_train(batch)
-                loss = results["loss"]
+                loss = results.get("loss_total", results["loss"])
                 kl = results["kl"]
                 negative_ll = results["negative_ll"]
                 loss.backward()
@@ -131,6 +200,14 @@ class Trainer:
                 wandb.log({"train_loss": loss})
                 wandb.log({"train_negative_ll": negative_ll})
                 wandb.log({"train_kl": kl})
+                if "trust_loss" in results:
+                    wandb.log({"train_trust_loss": results["trust_loss"]})
+                    if self.config.knowledge_merge == "poe":
+                        mean_trust = self.model.latent_encoder.last_aux.get("Cc", {}).get(
+                            "trust", None
+                        )
+                        if mean_trust is not None:
+                            wandb.log({"train_mean_trust": mean_trust.mean()})
 
                 if it % EVAL_ITER == 0 and it > 0:
                     losses, val_loss = self.eval()
