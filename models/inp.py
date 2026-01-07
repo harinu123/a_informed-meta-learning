@@ -56,11 +56,13 @@ class INP(nn.Module):
         Sample latent variable z given the global representation
         (and during training given the target)
         """
-        q_zCc = self.infer_latent_dist(R, knowledge, x_context.shape[1])
+        q_zCc = self.infer_latent_dist(R, knowledge, x_context.shape[1], tag="Cc")
 
         if y_target is not None and self.training:
             R_from_target = self.encode_globally(x_target, y_target, x_target)
-            q_zCct = self.infer_latent_dist(R_from_target, knowledge, x_target.shape[1])
+            q_zCct = self.infer_latent_dist(
+                R_from_target, knowledge, x_target.shape[1], tag="Cct"
+            )
             sampling_dist = q_zCct
         else:
             q_zCct = None
@@ -73,11 +75,11 @@ class INP(nn.Module):
         # z_samples.shape = [n_z_samples, bs, 1, z_dim]
         return z_samples, q_zCc, q_zCct
 
-    def infer_latent_dist(self, R, knowledge, n):
+    def infer_latent_dist(self, R, knowledge, n, tag="Cc"):
         """
         Infer the latent distribution given the global representation
         """
-        q_z_stats = self.latent_encoder(R, knowledge, n)
+        q_z_stats = self.latent_encoder(R, knowledge, n, tag=tag)
         q_z_loc, q_z_scale = q_z_stats.split(self.config.hidden_dim, dim=-1)
         q_z_scale = 0.01 + 0.99 * F.softplus(q_z_scale)
         q_zCc = MultivariateNormalDiag(q_z_loc, q_z_scale)
