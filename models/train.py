@@ -58,6 +58,16 @@ def corrupt_knowledge(knowledge, p, device):
     return knowledge_used, match
 
 
+def make_fully_mismatched_knowledge(knowledge, device):
+    if knowledge is None:
+        return None
+    bs = len(knowledge) if not isinstance(knowledge, torch.Tensor) else knowledge.shape[0]
+    if bs < 2:
+        return knowledge
+    perm = _randperm_no_fixed(bs, device=device)
+    return _shuffle_knowledge(knowledge, perm)
+
+
 class Trainer:
     def __init__(self, config, save_dir, load_path=None, last_save_it=0):
         self.config = config
@@ -78,6 +88,7 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
 
         self.loss_func = ELBOLoss(beta=config.beta)
+        self.loss_func_vec = ELBOLoss(reduction=None, beta=config.beta)
         if load_path is not None:
             print(f"Loading model from state dict {load_path}")
             state_dict = torch.load(load_path)
@@ -106,6 +117,27 @@ class Trainer:
             )
 
         self.save_dir = save_dir
+
+    def _latent_mu(self, x_context, y_context, x_target, knowledge, tag):
+        x_context_e = self.model.x_encoder(x_context)
+        x_target_e = self.model.x_encoder(x_target)
+        R = self.model.encode_globally(x_context_e, y_context, x_target_e)
+
+        q_z_stats = self.model.latent_encoder(
+            R, knowledge, x_context.shape[1], tag=tag
+        )
+        mu, _rho = q_z_stats.split(self.config.hidden_dim, dim=-1)
+        return mu.squeeze(1)
+
+    def _pred_and_nll_vec(self, x_context, y_context, x_target, y_target, knowledge):
+        outputs = self.model(
+            x_context, y_context, x_target, y_target=y_target, knowledge=knowledge
+        )
+        p_yCc = outputs[0]
+        pred_mean = p_yCc.mean.mean(dim=0)
+
+        _loss_vec, _kl_vec, nll_vec = self.loss_func_vec(outputs, y_target)
+        return pred_mean, nll_vec
 
     def get_loss(self, x_context, y_context, x_target, y_target, knowledge):
         if self.config.sort_context:
@@ -167,6 +199,67 @@ class Trainer:
         else:
             results["loss_total"] = results["loss"]
 
+        use_contrastive = self.config.knowledge_contrastive and (
+            self.config.kcon_inv_weight != 0.0 or self.config.kcon_use_weight != 0.0
+        )
+        use_functional = self.config.knowledge_functional and (
+            self.config.kfunc_mismatch_weight != 0.0
+            or self.config.kfunc_improve_weight != 0.0
+        )
+
+        if use_contrastive:
+            k_true = knowledge
+            k_null = None
+            k_mis = make_fully_mismatched_knowledge(knowledge, self.device)
+
+            mu_true = self._latent_mu(
+                x_context, y_context, x_target, k_true, tag="Cc_true_aux"
+            )
+            mu_null = self._latent_mu(
+                x_context, y_context, x_target, k_null, tag="Cc_null_aux"
+            )
+            mu_mis = self._latent_mu(
+                x_context, y_context, x_target, k_mis, tag="Cc_mis_aux"
+            )
+
+            inv_loss = F.mse_loss(mu_mis, mu_null)
+            dist = torch.norm(mu_true - mu_null, dim=-1)
+            use_loss = F.relu(self.config.kcon_margin - dist).mean()
+
+            results["kcon_inv_loss"] = inv_loss
+            results["kcon_use_loss"] = use_loss
+            results["loss_total"] = results["loss_total"] + (
+                self.config.kcon_inv_weight * inv_loss
+                + self.config.kcon_use_weight * use_loss
+            )
+
+        if use_functional:
+            k_true = knowledge
+            k_null = None
+            k_mis = make_fully_mismatched_knowledge(knowledge, self.device)
+
+            pred_null, nll_null = self._pred_and_nll_vec(
+                x_context, y_context, x_target, y_target, k_null
+            )
+            pred_mis, nll_mis = self._pred_and_nll_vec(
+                x_context, y_context, x_target, y_target, k_mis
+            )
+            pred_true, nll_true = self._pred_and_nll_vec(
+                x_context, y_context, x_target, y_target, k_true
+            )
+
+            kfunc_mismatch = F.mse_loss(pred_mis, pred_null)
+            kfunc_improve = F.relu(
+                self.config.kfunc_margin + nll_true - nll_null
+            ).mean()
+
+            results["kfunc_mismatch_loss"] = kfunc_mismatch
+            results["kfunc_improve_loss"] = kfunc_improve
+            results["loss_total"] = results["loss_total"] + (
+                self.config.kfunc_mismatch_weight * kfunc_mismatch
+                + self.config.kfunc_improve_weight * kfunc_improve
+            )
+
         return results
 
     def run_batch_eval(self, batch, num_context=5):
@@ -208,6 +301,18 @@ class Trainer:
                         )
                         if mean_trust is not None:
                             wandb.log({"train_mean_trust": mean_trust.mean()})
+                if "kcon_inv_loss" in results:
+                    wandb.log({"train_kcon_inv_loss": results["kcon_inv_loss"]})
+                if "kcon_use_loss" in results:
+                    wandb.log({"train_kcon_use_loss": results["kcon_use_loss"]})
+                if "kfunc_mismatch_loss" in results:
+                    wandb.log(
+                        {"train_kfunc_mismatch_loss": results["kfunc_mismatch_loss"]}
+                    )
+                if "kfunc_improve_loss" in results:
+                    wandb.log(
+                        {"train_kfunc_improve_loss": results["kfunc_improve_loss"]}
+                    )
 
                 if it % EVAL_ITER == 0 and it > 0:
                     losses, val_loss = self.eval()

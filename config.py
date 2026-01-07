@@ -247,6 +247,28 @@ def main():
         help="Hidden dimension of knowledge trust head",
         default=None,
     )
+    # knowledge regularization (optional)
+    parser.add_argument(
+        "--knowledge-contrastive",
+        type=str2bool,
+        const=True,
+        nargs="?",
+        default=False,
+    )
+    parser.add_argument("--kcon-inv-weight", type=float, default=0.0)
+    parser.add_argument("--kcon-use-weight", type=float, default=0.0)
+    parser.add_argument("--kcon-margin", type=float, default=0.0)
+
+    parser.add_argument(
+        "--knowledge-functional",
+        type=str2bool,
+        const=True,
+        nargs="?",
+        default=False,
+    )
+    parser.add_argument("--kfunc-mismatch-weight", type=float, default=0.0)
+    parser.add_argument("--kfunc-improve-weight", type=float, default=0.0)
+    parser.add_argument("--kfunc-margin", type=float, default=0.0)
     # saving args
     parser.add_argument(
         "--run-name-prefix", type=str, help="Run name prefix", default="run"
