@@ -215,7 +215,7 @@ def main():
         type=str,
         help="Knowledge merge",
         default="concat",
-        choices=["concat", "sum", "mlp"],
+        choices=["concat", "sum", "mlp", "poe"],
     )
     parser.add_argument(
         "--knowledge-dim",
@@ -223,6 +223,52 @@ def main():
         help="Dimension of knowledge representaiton",
         default=None,
     )
+    parser.add_argument(
+        "--knowledge-mismatch-prob",
+        type=float,
+        help="Per-sample probability to corrupt knowledge in a batch",
+        default=0.25,
+    )
+    parser.add_argument(
+        "--knowledge-trust-loss-weight",
+        type=float,
+        help="Coefficient on BCE trust loss",
+        default=0.1,
+    )
+    parser.add_argument(
+        "--knowledge-trust-num-hidden",
+        type=int,
+        help="Number of hidden layers in knowledge trust head",
+        default=1,
+    )
+    parser.add_argument(
+        "--knowledge-trust-hidden-dim",
+        type=int,
+        help="Hidden dimension of knowledge trust head",
+        default=None,
+    )
+    # knowledge regularization (optional)
+    parser.add_argument(
+        "--knowledge-contrastive",
+        type=str2bool,
+        const=True,
+        nargs="?",
+        default=False,
+    )
+    parser.add_argument("--kcon-inv-weight", type=float, default=0.0)
+    parser.add_argument("--kcon-use-weight", type=float, default=0.0)
+    parser.add_argument("--kcon-margin", type=float, default=0.0)
+
+    parser.add_argument(
+        "--knowledge-functional",
+        type=str2bool,
+        const=True,
+        nargs="?",
+        default=False,
+    )
+    parser.add_argument("--kfunc-mismatch-weight", type=float, default=0.0)
+    parser.add_argument("--kfunc-improve-weight", type=float, default=0.0)
+    parser.add_argument("--kfunc-margin", type=float, default=0.0)
     # saving args
     parser.add_argument(
         "--run-name-prefix", type=str, help="Run name prefix", default="run"
@@ -245,6 +291,8 @@ def main():
         args.knowledge_extractor_hidden_dim = args.hidden_dim
     if args.knowledge_dim is None:
         args.knowledge_dim = args.hidden_dim
+    if args.knowledge_trust_hidden_dim is None:
+        args.knowledge_trust_hidden_dim = args.hidden_dim
 
     print("Setting config.toml")
     config = Config.from_args(args)

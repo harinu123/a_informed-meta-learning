@@ -217,7 +217,48 @@ class LatentEncoder(nn.Module):
         self.knowledge_dim = config.knowledge_dim
         self.knowledge_dropout = config.knowledge_dropout
 
-        if config.knowledge_merge == "sum":
+        if config.use_knowledge:
+            self.knowledge_encoder = KnowledgeEncoder(config)
+        else:
+            self.knowledge_encoder = None
+
+        if config.knowledge_merge == "poe":
+            self.k_proj = (
+                nn.Identity()
+                if config.knowledge_dim == config.hidden_dim
+                else nn.Linear(config.knowledge_dim, config.hidden_dim)
+            )
+
+            if config.latent_encoder_num_hidden > 0:
+                self.encoder_data = MLP(
+                    input_size=config.hidden_dim,
+                    hidden_size=config.hidden_dim,
+                    num_hidden=config.latent_encoder_num_hidden,
+                    output_size=2 * config.hidden_dim,
+                )
+                self.encoder_know = MLP(
+                    input_size=config.hidden_dim,
+                    hidden_size=config.hidden_dim,
+                    num_hidden=config.latent_encoder_num_hidden,
+                    output_size=2 * config.hidden_dim,
+                )
+            else:
+                self.encoder_data = nn.Linear(config.hidden_dim, 2 * config.hidden_dim)
+                self.encoder_know = nn.Linear(config.hidden_dim, 2 * config.hidden_dim)
+
+            trust_in_dim = 4 * config.hidden_dim
+            if config.knowledge_trust_num_hidden > 0:
+                self.trust_net = MLP(
+                    trust_in_dim,
+                    config.knowledge_trust_hidden_dim,
+                    config.knowledge_trust_num_hidden,
+                    1,
+                )
+            else:
+                self.trust_net = nn.Linear(trust_in_dim, 1)
+            self.last_aux = {}
+
+        elif config.knowledge_merge == "sum":
             input_dim = config.hidden_dim
 
         elif config.knowledge_merge == "concat":
@@ -235,33 +276,85 @@ class LatentEncoder(nn.Module):
         else:
             raise NotImplementedError
 
-        if config.use_knowledge:
-            self.knowledge_encoder = KnowledgeEncoder(config)
-
-        else:
-            self.knowledge_encoder = None
-
-        if config.latent_encoder_num_hidden > 0:
-            self.encoder = MLP(
-                input_size=input_dim,
-                hidden_size=config.hidden_dim,
-                num_hidden=config.latent_encoder_num_hidden,
-                output_size=2 * config.hidden_dim,
-            )
-        else:
-            self.encoder = nn.Linear(input_dim, 2 * config.hidden_dim)
+        if config.knowledge_merge != "poe":
+            if config.latent_encoder_num_hidden > 0:
+                self.encoder = MLP(
+                    input_size=input_dim,
+                    hidden_size=config.hidden_dim,
+                    num_hidden=config.latent_encoder_num_hidden,
+                    output_size=2 * config.hidden_dim,
+                )
+            else:
+                self.encoder = nn.Linear(input_dim, 2 * config.hidden_dim)
         self.config = config
 
-    def forward(self, R, knowledge, n):
+    def _bounded_scale(self, rho):
+        return 0.01 + 0.99 * F.softplus(rho)
+
+    def _inv_bounded_scale(self, scale, eps=1e-6):
+        y = (scale - 0.01) / 0.99
+        y = torch.clamp(y, min=eps)
+        return torch.log(torch.expm1(y) + eps)
+
+    def forward(self, R, knowledge, n, tag="Cc"):
         """
         Infer the latent distribution given the global representation
         """
-        drop_knowledge = torch.rand(1) < self.knowledge_dropout
-        if drop_knowledge or knowledge is None:
-            k = torch.zeros((R.shape[0], 1, self.knowledge_dim)).to(R.device)
+        drop_knowledge = torch.rand(1, device=R.device) < self.knowledge_dropout
+        knowledge_available = (
+            self.config.use_knowledge
+            and (knowledge is not None)
+            and (not drop_knowledge)
+            and (self.knowledge_encoder is not None)
+        )
 
-        else:
+        if knowledge_available:
             k = self.knowledge_encoder(knowledge)
+        else:
+            k = torch.zeros((R.shape[0], 1, self.knowledge_dim), device=R.device)
+
+        if self.config.knowledge_merge == "poe":
+            k_r = self.k_proj(k)
+
+            data_stats = self.encoder_data(R)
+            know_stats = self.encoder_know(k_r)
+            mu_D, rho_D = data_stats.split(self.config.hidden_dim, dim=-1)
+            mu_K, rho_K = know_stats.split(self.config.hidden_dim, dim=-1)
+
+            sigma_D = self._bounded_scale(rho_D)
+            sigma_K = self._bounded_scale(rho_K)
+            var_D = sigma_D ** 2
+            var_K = sigma_K ** 2
+            tau_D = 1 / var_D
+            tau_K = 1 / var_K
+
+            if knowledge_available:
+                trust_features = torch.cat(
+                    [R, k_r, torch.abs(R - k_r), R * k_r], dim=-1
+                )
+                trust_logit = self.trust_net(trust_features)
+                lam = torch.sigmoid(trust_logit)
+            else:
+                trust_logit = torch.full(
+                    (R.shape[0], 1, 1), -10.0, device=R.device
+                )
+                lam = torch.zeros_like(trust_logit)
+
+            tau = tau_D + lam * tau_K
+            mu = (tau_D * mu_D + lam * tau_K * mu_K) / tau
+            var = 1 / tau
+            sigma = torch.sqrt(var)
+            rho = self._inv_bounded_scale(sigma)
+
+            q_z_stats = torch.cat([mu, rho], dim=-1)
+
+            if hasattr(self, "last_aux"):
+                self.last_aux[tag] = {
+                    "trust_logit": trust_logit.detach(),
+                    "trust": lam.detach(),
+                    "drop_knowledge": bool(drop_knowledge),
+                }
+            return q_z_stats
 
         if self.config.knowledge_merge == "sum":
             encoder_input = F.relu(R + k)
