@@ -34,30 +34,6 @@ def _shuffle_knowledge(knowledge, perm):
         return [k_list[i] for i in perm_cpu]
 
 
-def corrupt_knowledge(knowledge, p, device):
-    # Returns (knowledge_used, match_label_tensor[bs]) where 1=match, 0=mismatch
-    if knowledge is None or p <= 0:
-        return knowledge, None
-    bs = len(knowledge) if not isinstance(knowledge, torch.Tensor) else knowledge.shape[0]
-    if bs < 2:
-        return knowledge, torch.ones(bs, device=device)
-    perm = _randperm_no_fixed(bs, device=device)
-    shuffled = _shuffle_knowledge(knowledge, perm)
-    mask = (torch.rand(bs, device=device) < p)
-    match = (~mask).float()
-
-    if isinstance(knowledge, torch.Tensor):
-        knowledge_used = knowledge.clone()
-        knowledge_used[mask] = shuffled[mask]
-    else:
-        k_list = list(knowledge)
-        s_list = list(shuffled)
-        knowledge_used = [
-            (s_list[i] if mask[i].item() else k_list[i]) for i in range(bs)
-        ]
-    return knowledge_used, match
-
-
 def make_fully_mismatched_knowledge(knowledge, device):
     if knowledge is None:
         return None
@@ -118,14 +94,12 @@ class Trainer:
 
         self.save_dir = save_dir
 
-    def _latent_mu(self, x_context, y_context, x_target, knowledge, tag):
+    def _latent_mu(self, x_context, y_context, x_target, knowledge):
         x_context_e = self.model.x_encoder(x_context)
         x_target_e = self.model.x_encoder(x_target)
         R = self.model.encode_globally(x_context_e, y_context, x_target_e)
 
-        q_z_stats = self.model.latent_encoder(
-            R, knowledge, x_context.shape[1], tag=tag
-        )
+        q_z_stats = self.model.latent_encoder(R, knowledge, x_context.shape[1])
         mu, _rho = q_z_stats.split(self.config.hidden_dim, dim=-1)
         return mu.squeeze(1)
 
@@ -173,31 +147,8 @@ class Trainer:
         if isinstance(knowledge, torch.Tensor):
             knowledge = knowledge.to(self.device)
 
-        knowledge_used = knowledge
-        match = None
-        if self.config.use_knowledge and self.config.knowledge_merge == "poe":
-            knowledge_used, match = corrupt_knowledge(
-                knowledge, self.config.knowledge_mismatch_prob, self.device
-            )
-
-        results = self.get_loss(
-            x_context, y_context, x_target, y_target, knowledge_used
-        )
-
-        if match is not None and knowledge_used is not None:
-            aux = self.model.latent_encoder.last_aux.get("Cc", None)
-            if aux is not None and (not aux["drop_knowledge"]):
-                trust_logit = aux["trust_logit"].squeeze(-1).squeeze(1)
-                trust_loss = F.binary_cross_entropy_with_logits(trust_logit, match)
-                results["trust_loss"] = trust_loss
-                results["loss_total"] = (
-                    results["loss"]
-                    + self.config.knowledge_trust_loss_weight * trust_loss
-                )
-            else:
-                results["loss_total"] = results["loss"]
-        else:
-            results["loss_total"] = results["loss"]
+        results = self.get_loss(x_context, y_context, x_target, y_target, knowledge)
+        results["loss_total"] = results["loss"]
 
         use_contrastive = self.config.knowledge_contrastive and (
             self.config.kcon_inv_weight != 0.0 or self.config.kcon_use_weight != 0.0
@@ -212,15 +163,9 @@ class Trainer:
             k_null = None
             k_mis = make_fully_mismatched_knowledge(knowledge, self.device)
 
-            mu_true = self._latent_mu(
-                x_context, y_context, x_target, k_true, tag="Cc_true_aux"
-            )
-            mu_null = self._latent_mu(
-                x_context, y_context, x_target, k_null, tag="Cc_null_aux"
-            )
-            mu_mis = self._latent_mu(
-                x_context, y_context, x_target, k_mis, tag="Cc_mis_aux"
-            )
+            mu_true = self._latent_mu(x_context, y_context, x_target, k_true)
+            mu_null = self._latent_mu(x_context, y_context, x_target, k_null)
+            mu_mis = self._latent_mu(x_context, y_context, x_target, k_mis)
 
             inv_loss = F.mse_loss(mu_mis, mu_null)
             dist = torch.norm(mu_true - mu_null, dim=-1)
@@ -293,14 +238,6 @@ class Trainer:
                 wandb.log({"train_loss": loss})
                 wandb.log({"train_negative_ll": negative_ll})
                 wandb.log({"train_kl": kl})
-                if "trust_loss" in results:
-                    wandb.log({"train_trust_loss": results["trust_loss"]})
-                    if self.config.knowledge_merge == "poe":
-                        mean_trust = self.model.latent_encoder.last_aux.get("Cc", {}).get(
-                            "trust", None
-                        )
-                        if mean_trust is not None:
-                            wandb.log({"train_mean_trust": mean_trust.mean()})
                 if "kcon_inv_loss" in results:
                     wandb.log({"train_kcon_inv_loss": results["kcon_inv_loss"]})
                 if "kcon_use_loss" in results:

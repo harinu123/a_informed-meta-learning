@@ -223,30 +223,6 @@ def main():
         help="Dimension of knowledge representaiton",
         default=None,
     )
-    parser.add_argument(
-        "--knowledge-mismatch-prob",
-        type=float,
-        help="Per-sample probability to corrupt knowledge in a batch",
-        default=0.25,
-    )
-    parser.add_argument(
-        "--knowledge-trust-loss-weight",
-        type=float,
-        help="Coefficient on BCE trust loss",
-        default=0.1,
-    )
-    parser.add_argument(
-        "--knowledge-trust-num-hidden",
-        type=int,
-        help="Number of hidden layers in knowledge trust head",
-        default=1,
-    )
-    parser.add_argument(
-        "--knowledge-trust-hidden-dim",
-        type=int,
-        help="Hidden dimension of knowledge trust head",
-        default=None,
-    )
     # knowledge regularization (optional)
     parser.add_argument(
         "--knowledge-contrastive",
