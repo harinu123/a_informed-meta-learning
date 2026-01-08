@@ -60,7 +60,9 @@ class INP(nn.Module):
 
         if y_target is not None and self.training:
             R_from_target = self.encode_globally(x_target, y_target, x_target)
-            q_zCct = self.infer_latent_dist(R_from_target, knowledge, x_target.shape[1])
+            q_zCct = self.infer_latent_dist(
+                R_from_target, knowledge, x_target.shape[1]
+            )
             sampling_dist = q_zCct
         else:
             q_zCct = None

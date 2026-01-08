@@ -217,6 +217,11 @@ class LatentEncoder(nn.Module):
         self.knowledge_dim = config.knowledge_dim
         self.knowledge_dropout = config.knowledge_dropout
 
+        if config.use_knowledge:
+            self.knowledge_encoder = KnowledgeEncoder(config)
+        else:
+            self.knowledge_encoder = None
+
         if config.knowledge_merge == "sum":
             input_dim = config.hidden_dim
 
@@ -235,12 +240,6 @@ class LatentEncoder(nn.Module):
         else:
             raise NotImplementedError
 
-        if config.use_knowledge:
-            self.knowledge_encoder = KnowledgeEncoder(config)
-
-        else:
-            self.knowledge_encoder = None
-
         if config.latent_encoder_num_hidden > 0:
             self.encoder = MLP(
                 input_size=input_dim,
@@ -256,12 +255,18 @@ class LatentEncoder(nn.Module):
         """
         Infer the latent distribution given the global representation
         """
-        drop_knowledge = torch.rand(1) < self.knowledge_dropout
-        if drop_knowledge or knowledge is None:
-            k = torch.zeros((R.shape[0], 1, self.knowledge_dim)).to(R.device)
+        drop_knowledge = torch.rand(1, device=R.device) < self.knowledge_dropout
+        knowledge_available = (
+            self.config.use_knowledge
+            and (knowledge is not None)
+            and (not drop_knowledge)
+            and (self.knowledge_encoder is not None)
+        )
 
-        else:
+        if knowledge_available:
             k = self.knowledge_encoder(knowledge)
+        else:
+            k = torch.zeros((R.shape[0], 1, self.knowledge_dim), device=R.device)
 
         if self.config.knowledge_merge == "sum":
             encoder_input = F.relu(R + k)
