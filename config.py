@@ -215,7 +215,7 @@ def main():
         type=str,
         help="Knowledge merge",
         default="concat",
-        choices=["concat", "sum", "mlp"],
+        choices=["concat", "sum", "mlp", "poe"],
     )
     parser.add_argument(
         "--knowledge-dim",
@@ -279,6 +279,8 @@ def main():
         args.knowledge_extractor_hidden_dim = args.hidden_dim
     if args.knowledge_dim is None:
         args.knowledge_dim = args.hidden_dim
+    # if args.knowledge_trust_hidden_dim is None:
+    #     args.knowledge_trust_hidden_dim = args.hidden_dim
 
     print("Setting config.toml")
     config = Config.from_args(args)
