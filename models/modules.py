@@ -251,7 +251,7 @@ class LatentEncoder(nn.Module):
             self.encoder = nn.Linear(input_dim, 2 * config.hidden_dim)
         self.config = config
 
-    def forward(self, R, knowledge, n):
+    def forward(self, R, knowledge, n, tag="Cc"):
         """
         Infer the latent distribution given the global representation
         """
