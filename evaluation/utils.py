@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 from scipy.stats import bootstrap
 from sklearn.metrics import auc
+from evaluation.knowledge_guidance import guided_forward
 
 EVAL_CONFIGS = {
     "test_num_z_samples": 32,
@@ -164,8 +165,8 @@ def get_summary_df(
                     y_context = y_target[:, sample_idx[:num_context], :]
 
                     for eval_type in eval_type_ls:
-                        with torch.no_grad():
-                            if eval_type == "raw":
+                        if eval_type == "guided":
+                            if not config.use_knowledge:
                                 outputs = model(
                                     x_context,
                                     y_context,
@@ -173,8 +174,67 @@ def get_summary_df(
                                     y_target=y_target,
                                     knowledge=None,
                                 )
-                            elif config.use_knowledge:
-                                if eval_type == "informed":
+                                steer_s = torch.zeros(
+                                    x_context.shape[0], device="cpu"
+                                )
+                            else:
+                                n_ctx = x_context.shape[1]
+                                k_cal = min(
+                                    getattr(config, "kg_num_cal", 3), max(0, n_ctx)
+                                )
+                                if k_cal == 0:
+                                    outputs = model(
+                                        x_context,
+                                        y_context,
+                                        x_target,
+                                        y_target=y_target,
+                                        knowledge=None,
+                                    )
+                                    steer_s = torch.zeros(
+                                        x_context.shape[0], device="cpu"
+                                    )
+                                else:
+                                    perm = torch.randperm(
+                                        n_ctx, device=x_context.device
+                                    )
+                                    cal_idx = perm[:k_cal]
+                                    cond_idx = perm[k_cal:]
+
+                                    x_cal = x_context[:, cal_idx, :]
+                                    y_cal = y_context[:, cal_idx, :]
+                                    if cond_idx.numel() == 0:
+                                        x_cond = x_context[:, :0, :]
+                                        y_cond = y_context[:, :0, :]
+                                    else:
+                                        x_cond = x_context[:, cond_idx, :]
+                                        y_cond = y_context[:, cond_idx, :]
+
+                                    outputs, steer_s = guided_forward(
+                                        model=model,
+                                        x_cond=x_cond,
+                                        y_cond=y_cond,
+                                        x_cal=x_cal,
+                                        y_cal=y_cal,
+                                        x_target=x_target,
+                                        y_target=y_target,
+                                        knowledge=knowledge,
+                                        steps=getattr(config, "kg_steps", 15),
+                                        lr=getattr(config, "kg_lr", 0.2),
+                                        s0=getattr(config, "kg_s0", 0.2),
+                                        prior_w=getattr(config, "kg_prior_w", 0.01),
+                                    )
+                        else:
+                            with torch.no_grad():
+                                if eval_type == "raw":
+                                    outputs = model(
+                                        x_context,
+                                        y_context,
+                                        x_target,
+                                        y_target=y_target,
+                                        knowledge=None,
+                                    )
+                                    steer_s = None
+                                elif config.use_knowledge and eval_type == "informed":
                                     outputs = model(
                                         x_context,
                                         y_context,
@@ -182,7 +242,8 @@ def get_summary_df(
                                         y_target=y_target,
                                         knowledge=knowledge,
                                     )
-                                else:
+                                    steer_s = None
+                                elif config.use_knowledge:
                                     mask = get_mask(eval_type)
                                     outputs = model(
                                         x_context,
@@ -191,8 +252,9 @@ def get_summary_df(
                                         y_target=y_target,
                                         knowledge=knowledge * mask,
                                     )
-                            else:
-                                continue
+                                    steer_s = None
+                                else:
+                                    continue
                             outputs = tuple(
                                 [
                                     o.cpu() if isinstance(o, torch.Tensor) else o
@@ -213,6 +275,9 @@ def get_summary_df(
                                     "x_target": x_target.cpu(),
                                     "y_target": y_target.cpu(),
                                     "knowledge": knowledge,
+                                    "steer_s": steer_s.cpu()
+                                    if steer_s is not None
+                                    else None,
                                 }
                             )
 
