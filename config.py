@@ -267,8 +267,8 @@ def main():
         args.knowledge_extractor_hidden_dim = args.hidden_dim
     if args.knowledge_dim is None:
         args.knowledge_dim = args.hidden_dim
-    if args.knowledge_trust_hidden_dim is None:
-        args.knowledge_trust_hidden_dim = args.hidden_dim
+    # if args.knowledge_trust_hidden_dim is None:
+    #     args.knowledge_trust_hidden_dim = args.hidden_dim
 
     print("Setting config.toml")
     config = Config.from_args(args)
