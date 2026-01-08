@@ -57,27 +57,28 @@ def optimize_s_from_cal(
     y_cal:             [bs, n_cal, out_dim]
     Returns s*: [bs]
     """
-    bs = y_cal.shape[0]
-    logit_s = torch.zeros(bs, device=y_cal.device, requires_grad=True)
-    opt = torch.optim.Adam([logit_s], lr=lr)
+    with torch.enable_grad():
+        bs = y_cal.shape[0]
+        logit_s = torch.zeros(bs, device=y_cal.device, requires_grad=True)
+        opt = torch.optim.Adam([logit_s], lr=lr)
 
-    for _ in range(steps):
-        s = torch.sigmoid(logit_s)
-        mu_s, var_s = guided_diag_gaussian(mu0, var0, mu1, var1, s)
+        for _ in range(steps):
+            s = torch.sigmoid(logit_s)
+            mu_s, var_s = guided_diag_gaussian(mu0, var0, mu1, var1, s)
 
-        nll = 0.5 * (
-            ((y_cal - mu_s) ** 2) / var_s + torch.log(var_s) + 1.8378770664093453
-        )
-        nll = nll.sum(dim=(1, 2))
+            nll = 0.5 * (
+                ((y_cal - mu_s) ** 2) / var_s + torch.log(var_s) + 1.8378770664093453
+            )
+            nll = nll.sum(dim=(1, 2))
 
-        reg = prior_w * (s - s0).pow(2)
-        loss = (nll + reg).mean()
+            reg = prior_w * (s - s0).pow(2)
+            loss = (nll + reg).mean()
 
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
 
-    return torch.sigmoid(logit_s).detach()
+        return torch.sigmoid(logit_s).detach()
 
 
 def guided_forward(
