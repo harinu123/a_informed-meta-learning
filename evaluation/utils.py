@@ -193,6 +193,47 @@ def get_summary_df(
                                     steer_s = torch.zeros(
                                         x_context.shape[0], device="cpu"
                                     )
+                                    if k_cal == 0:
+                                        outputs = model(
+                                            x_context,
+                                            y_context,
+                                            x_target,
+                                            y_target=y_target,
+                                            knowledge=None,
+                                        )
+                                        steer_s = torch.zeros(
+                                            x_context.shape[0], device="cpu"
+                                        )
+                                    else:
+                                        perm = torch.randperm(
+                                            n_ctx, device=x_context.device
+                                        )
+                                        cal_idx = perm[:k_cal]
+                                        cond_idx = perm[k_cal:]
+
+                                        x_cal = x_context[:, cal_idx, :]
+                                        y_cal = y_context[:, cal_idx, :]
+                                        if cond_idx.numel() == 0:
+                                            x_cond = x_context[:, :0, :]
+                                            y_cond = y_context[:, :0, :]
+                                        else:
+                                            x_cond = x_context[:, cond_idx, :]
+                                            y_cond = y_context[:, cond_idx, :]
+
+                                        outputs, steer_s = guided_forward(
+                                            model=model,
+                                            x_cond=x_cond,
+                                            y_cond=y_cond,
+                                            x_cal=x_cal,
+                                            y_cal=y_cal,
+                                            x_target=x_target,
+                                            y_target=y_target,
+                                            knowledge=knowledge,
+                                            steps=getattr(config, "kg_steps", 15),
+                                            lr=getattr(config, "kg_lr", 0.2),
+                                            s0=getattr(config, "kg_s0", 0.2),
+                                            prior_w=getattr(config, "kg_prior_w", 0.01),
+                                        )
                                 else:
                                     perm = torch.randperm(
                                         n_ctx, device=x_context.device
